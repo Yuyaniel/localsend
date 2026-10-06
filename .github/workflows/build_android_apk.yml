@@ -43,19 +43,74 @@ jobs:
         working-directory: ${{ env.APK_BUILD_DIR }}
         env:
           ENCODED_STRING: ${{ secrets.ANDROID_KEY_PROPERTIES }}
-        run: echo $ENCODED_STRING | base64 -di > app/android/key.properties
+        run: |
+          if [ -n "$ENCODED_STRING" ]; then
+            echo "$ENCODED_STRING" | base64 -di > app/android/key.properties
+            echo "Decoded ANDROID_KEY_PROPERTIES ($(wc -c < app/android/key.properties) bytes)."
+          else
+            echo "ANDROID_KEY_PROPERTIES is not set; skipping (fallback step will handle signing)."
+          fi
 
       - name: Decode android-keystore.jks file
         working-directory: ${{ env.APK_BUILD_DIR }}
         env:
           ENCODED_STRING: ${{ secrets.ANDROID_KEY_STORE }}
-        run: mkdir secrets && echo $ENCODED_STRING | base64 -di > secrets/android-keystore.jks
+        run: |
+          mkdir -p secrets
+          if [ -n "$ENCODED_STRING" ]; then
+            echo "$ENCODED_STRING" | base64 -di > secrets/android-keystore.jks
+            echo "Decoded ANDROID_KEY_STORE ($(wc -c < secrets/android-keystore.jks) bytes)."
+          else
+            echo "ANDROID_KEY_STORE is not set; skipping (fallback step will handle signing)."
+          fi
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
+
+      - name: Generate fallback signing config if secrets are missing
+        working-directory: ${{ env.APK_BUILD_DIR }}
+        run: |
+          KEY_PROPERTIES="app/android/key.properties"
+          KEYSTORE="secrets/android-keystore.jks"
+
+          if [ -s "$KEY_PROPERTIES" ] && [ -s "$KEYSTORE" ]; then
+            echo "Signing secrets are configured; using them as-is."
+            exit 0
+          fi
+
+          echo "::warning::No signing secrets configured. Generating a self-signed keystore for this build."
+          echo "::warning::This APK is signed with a generated key, NOT the official release key. It cannot overwrite or upgrade an official build."
+
+          STORE_PASS="localsend"
+          KEY_PASS="localsend"
+          KEY_ALIAS="localsend"
+
+          mkdir -p secrets
+          rm -f "$KEYSTORE" "$KEY_PROPERTIES"
+
+          keytool -genkeypair -v \
+            -keystore "$KEYSTORE" \
+            -storetype JKS \
+            -storepass "$STORE_PASS" \
+            -keypass "$KEY_PASS" \
+            -alias "$KEY_ALIAS" \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=LocalSend Fork CI, OU=CI, O=LocalSend, L=NA, ST=NA, C=NA"
+
+          cat > "$KEY_PROPERTIES" <<EOF
+storePassword=$STORE_PASS
+keyPassword=$KEY_PASS
+keyAlias=$KEY_ALIAS
+storeFile=../../../secrets/android-keystore.jks
+EOF
+
+          echo "Generated keystore at $KEYSTORE"
+          cat "$KEY_PROPERTIES"
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
